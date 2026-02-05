@@ -2,6 +2,9 @@
 job_report.html
 *.html
 
+# Job tracking data
+seen_jobs.json
+
 # Python
 __pycache__/
 *.py[cod]

@@ -8,13 +8,18 @@ Author: witcheer
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 import re
 import json
 import time
 from urllib.parse import urljoin
 import html
+import os
+
+
+# File to store previously seen jobs
+SEEN_JOBS_FILE = "seen_jobs.json"
 
 
 @dataclass
@@ -29,6 +34,8 @@ class JobOffer:
     source: str
     salary: Optional[str] = None
     tags: list = None
+    is_new: bool = True  # Flag to indicate if this is a new job
+    first_seen: Optional[str] = None  # Date when first seen
 
     def __post_init__(self):
         if self.tags is None:
@@ -67,6 +74,41 @@ class JobHunter:
         })
         self.jobs: list[JobOffer] = []
         self.max_age_days = 30
+        self.seen_jobs: dict = self._load_seen_jobs()
+
+    def _load_seen_jobs(self) -> dict:
+        """Load previously seen jobs from file"""
+        if os.path.exists(SEEN_JOBS_FILE):
+            try:
+                with open(SEEN_JOBS_FILE, 'r') as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, IOError):
+                return {}
+        return {}
+
+    def _save_seen_jobs(self):
+        """Save seen jobs to file"""
+        # Update seen jobs with current jobs
+        today = datetime.now().strftime("%Y-%m-%d")
+        for job in self.jobs:
+            job_key = job.url if job.url else f"{job.title}|{job.company}"
+            if job_key not in self.seen_jobs:
+                self.seen_jobs[job_key] = {
+                    'first_seen': today,
+                    'title': job.title,
+                    'company': job.company
+                }
+
+        with open(SEEN_JOBS_FILE, 'w') as f:
+            json.dump(self.seen_jobs, f, indent=2)
+
+    def _mark_seen_jobs(self):
+        """Mark jobs that were seen in previous runs"""
+        for job in self.jobs:
+            job_key = job.url if job.url else f"{job.title}|{job.company}"
+            if job_key in self.seen_jobs:
+                job.is_new = False
+                job.first_seen = self.seen_jobs[job_key].get('first_seen', 'Unknown')
 
     def is_relevant_job(self, title: str, description: str = "") -> bool:
         """Check if job matches desired criteria"""
@@ -954,20 +996,34 @@ class JobHunter:
 
         self.jobs = unique_jobs
 
+        # Mark previously seen jobs and save current jobs
+        self._mark_seen_jobs()
+        new_jobs_count = sum(1 for job in self.jobs if job.is_new)
+
         print("\n" + "-"*60)
         print(f"✨ Total unique jobs found: {len(self.jobs)}")
+        print(f"🆕 New jobs (not seen before): {new_jobs_count}")
+        print(f"👀 Previously seen jobs: {len(self.jobs) - new_jobs_count}")
         print("-"*60 + "\n")
+
+        # Save seen jobs for next run
+        self._save_seen_jobs()
 
     def generate_html_report(self, output_file: str = "job_report.html"):
         """Generate an HTML report of found jobs"""
 
-        # Sort jobs by date (most recent first), then by source
+        # Sort jobs: new jobs first, then by date (most recent first), then by source
         def sort_key(job):
+            # New jobs come first (is_new=True -> 0, is_new=False -> 1)
+            new_priority = 0 if job.is_new else 1
             if job.posted_date:
-                return (0, -job.posted_date.timestamp(), job.source)
-            return (1, 0, job.source)
+                return (new_priority, 0, -job.posted_date.timestamp(), job.source)
+            return (new_priority, 1, 0, job.source)
 
         sorted_jobs = sorted(self.jobs, key=sort_key)
+
+        # Count new jobs
+        new_jobs_count = sum(1 for job in self.jobs if job.is_new)
 
         # Group by relevance/category
         categories = {
@@ -1125,12 +1181,44 @@ class JobHunter:
             grid-template-columns: 1fr auto;
             gap: 1rem;
             align-items: start;
+            position: relative;
+        }}
+
+        .job-card.seen-before {{
+            opacity: 0.7;
+            border-left: 3px solid var(--text-secondary);
+        }}
+
+        .job-card.is-new {{
+            border-left: 3px solid var(--success);
         }}
 
         .job-card:hover {{
             border-color: var(--accent);
             transform: translateY(-2px);
             box-shadow: 0 8px 30px rgba(99, 102, 241, 0.15);
+            opacity: 1;
+        }}
+
+        .new-badge {{
+            background: var(--success);
+            color: white;
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.7rem;
+            font-weight: 600;
+            margin-left: 0.5rem;
+            text-transform: uppercase;
+        }}
+
+        .seen-badge {{
+            background: var(--text-secondary);
+            color: var(--bg-primary);
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.7rem;
+            font-weight: 600;
+            margin-left: 0.5rem;
         }}
 
         .job-info {{
@@ -1279,6 +1367,10 @@ class JobHunter:
                     <div class="stat-label">Total Jobs</div>
                 </div>
                 <div class="stat">
+                    <div class="stat-value" style="color: var(--success);">{new_jobs_count}</div>
+                    <div class="stat-label">New Jobs</div>
+                </div>
+                <div class="stat">
                     <div class="stat-value">{len(categories['growth'])}</div>
                     <div class="stat-label">Growth</div>
                 </div>
@@ -1354,10 +1446,14 @@ class JobHunter:
                 if job.salary:
                     salary_html = f'<span>💰 {html.escape(job.salary)}</span>'
 
+                # New/Seen badge
+                card_class = "job-card is-new" if job.is_new else "job-card seen-before"
+                status_badge = '<span class="new-badge">NEW</span>' if job.is_new else f'<span class="seen-badge">Seen {job.first_seen}</span>'
+
                 html_content += f'''
-                    <article class="job-card">
+                    <article class="{card_class}">
                         <div class="job-info">
-                            <h3 class="job-title">{safe_title}</h3>
+                            <h3 class="job-title">{safe_title}{status_badge}</h3>
                             <div class="job-meta">
                                 <span>🏢 {safe_company}</span>
                                 <span>📍 {safe_location}</span>
