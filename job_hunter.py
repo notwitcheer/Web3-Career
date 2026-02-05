@@ -213,71 +213,58 @@ class JobHunter:
             if not soup:
                 continue
 
-            # Try multiple selectors - web3.career uses various structures
-            job_rows = soup.select('tr.table_row, [class*="JobCard"], [class*="job-card"], .job-row')
-
-            # Also try finding all job links directly
-            if not job_rows:
-                job_links = soup.select('a[href*="/web3-job/"]')
-                for link in job_links[:30]:
-                    try:
-                        title = link.get_text(strip=True)
-                        if not title or len(title) < 5:
-                            continue
-                        if self.is_relevant_job(title):
-                            job_url = urljoin("https://web3.career", link.get('href', ''))
-                            # Try to find company from parent
-                            parent = link.find_parent(['tr', 'div', 'article'])
-                            company = "Unknown"
-                            if parent:
-                                company_elem = parent.select_one('h3, [class*="company"]')
-                                if company_elem:
-                                    company = company_elem.get_text(strip=True)
-
-                            self.jobs.append(JobOffer(
-                                title=title,
-                                company=company,
-                                url=job_url,
-                                location="Remote",
-                                posted_date=None,
-                                description="",
-                                source="web3.career",
-                                tags=[category]
-                            ))
-                            count += 1
-                    except Exception:
-                        continue
-                continue
+            # web3.career uses tr.table_row for job listings
+            job_rows = soup.select('tr.table_row')
 
             for row in job_rows[:25]:
                 try:
-                    title_elem = row.select_one('h2, h3, a[href*="/web3-job/"]')
-                    link_elem = row.select_one('a[href*="/web3-job/"], a[href*="/job/"]')
-                    company_elem = row.select_one('h3, [class*="company"]')
-                    date_elem = row.select_one('time, [class*="date"], [class*="time"]')
-                    location_elem = row.select_one('.location, [class*="location"]')
+                    # Find all links in the row - first link with /number pattern is the job link
+                    all_links = row.select('a[href]')
+                    job_link = None
+                    title = None
+                    company = None
 
-                    if not title_elem:
+                    for link in all_links:
+                        href = link.get('href', '')
+                        # Job URLs have format: /job-title-company/12345
+                        if re.search(r'/[^/]+-[^/]+/\d+$', href):
+                            if not job_link:
+                                job_link = href
+                                title = link.get_text(strip=True)
+                            elif not company:
+                                company = link.get_text(strip=True)
+                            break
+
+                    if not title or not job_link:
                         continue
 
-                    title = title_elem.get_text(strip=True)
-                    if not title or len(title) < 5:
-                        continue
+                    # Get company from second matching link if not found
+                    if not company:
+                        for link in all_links[1:3]:
+                            href = link.get('href', '')
+                            if re.search(r'/[^/]+-[^/]+/\d+$', href):
+                                company = link.get_text(strip=True)
+                                break
 
-                    job_url = urljoin("https://web3.career", link_elem.get('href', '')) if link_elem else ""
-                    company = company_elem.get_text(strip=True) if company_elem else "Unknown"
-                    date_str = date_elem.get_text(strip=True) if date_elem else ""
-                    location = location_elem.get_text(strip=True) if location_elem else "Remote"
+                    if not company:
+                        company = "Unknown"
 
-                    posted_date = self.parse_relative_date(date_str)
+                    job_url = urljoin("https://web3.career", job_link)
 
-                    if self.is_relevant_job(title) and self.is_recent(posted_date):
+                    # Get location from location links
+                    location = "Remote"
+                    location_links = row.select('a[href*="/web3-jobs-"]')
+                    if location_links:
+                        location_parts = [l.get_text(strip=True) for l in location_links[:2]]
+                        location = ", ".join(location_parts) if location_parts else "Remote"
+
+                    if self.is_relevant_job(title):
                         self.jobs.append(JobOffer(
                             title=title,
                             company=company,
                             url=job_url,
                             location=location,
-                            posted_date=posted_date,
+                            posted_date=None,
                             description="",
                             source="web3.career",
                             tags=[category]
